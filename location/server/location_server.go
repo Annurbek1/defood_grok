@@ -65,8 +65,12 @@ func (s *LocationServer) HandleWSConnection(c *websocket.Conn) {
 		return
 	}
 
+	// Ensure we set courier as inactive when connection closes
 	defer func() {
-		s.rdb.HSet(ctx, "courier:"+courierID, "is_active", "false")
+		err := s.rdb.HSet(ctx, "courier:"+courierID, "is_active", "false").Err()
+		if err != nil {
+			log.Printf("Error setting courier inactive: %v", err)
+		}
 		c.Close()
 	}()
 

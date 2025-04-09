@@ -3,8 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"food-delivery/api/config"
 	"log"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Shopify/sarama"
@@ -109,26 +112,130 @@ func setupRoutes(app *fiber.App, server *Server) {
 func (s *Server) initConnections() error {
 	// Redis connection
 	s.rdb = redis.NewClient(&redis.Options{
-		Addr: "localhost:6379",
+		Addr: s.config.Redis.Addr,
+		DB:   s.config.Redis.DB,
 	})
 
-	// RabbitMQ connection
-	conn, err := amqp.Dial("amqp://guest:guest@rabbitmq-denaueats:5672/")
-	if err != nil {
-		return err
+	// RabbitMQ connection with retry
+	var rabbitmqConn *amqp.Connection
+	var err error
+	for i := 0; i < 5; i++ {
+		log.Printf("Attempting to connect to RabbitMQ (attempt %d/5)...", i+1)
+		rabbitmqConn, err = amqp.Dial(s.config.RabbitMQ.URL)
+		if err == nil {
+			break
+		}
+		if i < 4 {
+			log.Printf("Failed to connect to RabbitMQ: %v. Retrying in 5 seconds...", err)
+			time.Sleep(5 * time.Second)
+		}
 	}
-	s.rabbitmq = conn
-
-	// Kafka producer
-	config := sarama.NewConfig()
-	config.Producer.Return.Successes = true
-	producer, err := sarama.NewSyncProducer([]string{"kafka-denaueats:9092"}, config)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to connect to RabbitMQ after 5 attempts: %v", err)
+	}
+	s.rabbitmq = rabbitmqConn
+
+	// Kafka producer setup
+	kafkaConfig := sarama.NewConfig()
+	kafkaConfig.Producer.Return.Successes = true
+	producer, err := sarama.NewSyncProducer(s.config.Kafka.Brokers, kafkaConfig)
+	if err != nil {
+		return fmt.Errorf("failed to create Kafka producer: %v", err)
 	}
 	s.kafka = producer
 
+	// Start courier status checker
+	go s.checkCourierStatus()
+
 	return nil
+}
+
+func (s *Server) logEvent(topic string, event map[string]interface{}) error {
+	event["timestamp"] = time.Now().Unix()
+	data, err := json.Marshal(event)
+	if err != nil {
+		return err
+	}
+
+	_, _, err = s.kafka.SendMessage(&sarama.ProducerMessage{
+		Topic: topic,
+		Value: sarama.StringEncoder(data),
+	})
+	return err
+}
+
+func (s *Server) checkCourierStatus() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		ctx := context.Background()
+		keys, err := s.rdb.Keys(ctx, "courier:*").Result()
+		if err != nil {
+			log.Printf("Failed to get courier keys: %v", err)
+			continue
+		}
+
+		for _, key := range keys {
+			courierData, err := s.rdb.HGetAll(ctx, key).Result()
+			if err != nil {
+				continue
+			}
+
+			if courierData["is_busy"] == "true" {
+				lastUpdate, _ := strconv.ParseInt(courierData["last_update"], 10, 64)
+				if time.Now().Unix()-lastUpdate > 300 { // 5 minutes
+					courierID := strings.TrimPrefix(key, "courier:")
+					s.handleCourierTimeout(courierID)
+				}
+			}
+		}
+	}
+}
+
+func (s *Server) handleCourierTimeout(courierID string) {
+	ctx := context.Background()
+
+	// Reset courier status
+	err := s.rdb.HSet(ctx, "courier:"+courierID, "is_busy", "false").Err()
+	if err != nil {
+		log.Printf("Failed to reset courier status: %v", err)
+		return
+	}
+
+	// Get order ID from courier
+	orderID, err := s.rdb.Get(ctx, "courier:"+courierID+":order").Result()
+	if err != nil {
+		return
+	}
+
+	// Return order to queue
+	ch, err := s.rabbitmq.Channel()
+	if err != nil {
+		return
+	}
+	defer ch.Close()
+
+	err = ch.Publish(
+		"",           // exchange
+		"food-queue", // routing key
+		false,        // mandatory
+		false,        // immediate
+		amqp.Publishing{
+			ContentType: "text/plain",
+			Body:        []byte(orderID),
+		},
+	)
+	if err != nil {
+		log.Printf("Failed to return order to queue: %v", err)
+	}
+
+	// Log event
+	s.logEvent("food_orders", map[string]interface{}{
+		"event":      "courier_timeout",
+		"courier_id": courierID,
+		"order_id":   orderID,
+	})
 }
 
 func errorHandler(c *fiber.Ctx, err error) error {
