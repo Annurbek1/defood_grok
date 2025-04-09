@@ -6,7 +6,7 @@ from rest_framework_simplejwt.views import TokenRefreshView
 from .views import (
     RegisterView, LoginView, ProfileView,
     OrderViewSet, RestaurantViewSet, AddressViewSet, MenuItemViewSet,
-    internal_order_detail, internal_order_complete,
+    internal_order_detail, internal_order_complete, health_check,
 )
 
 router = DefaultRouter()
@@ -28,6 +28,9 @@ urlpatterns = [
     # Internal API endpoints
     path('internal/order/<str:id>/', internal_order_detail, name='internal-order-detail'),
     path('internal/order/<str:id>/complete/', internal_order_complete, name='internal-order-complete'),
+
+    # Health check endpoint
+    path('health/', health_check, name='health-check'),
 ]
 
 if settings.DEBUG:

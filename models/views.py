@@ -192,6 +192,32 @@ def internal_order_complete(request, id):
     return Response({'message': 'Order updated'})
 
 
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def health_check(request):
+    try:
+        # Проверяем подключение к базе данных
+        from django.db import connection
+        connection.cursor()
+        
+        # Проверяем RabbitMQ
+        publisher = RabbitMQPublisher()
+        rabbitmq_ok = publisher.connect()
+        
+        if not rabbitmq_ok:
+            return Response(
+                {"status": "error", "message": "RabbitMQ connection failed"}, 
+                status=503
+            )
+            
+        return Response({"status": "healthy"}, status=200)
+    except Exception as e:
+        return Response(
+            {"status": "error", "message": str(e)}, 
+            status=503
+        )
+
+
 class RestaurantViewSet(ModelViewSet):
     queryset = Restaurant.objects.all()
     serializer_class = RestaurantSerializer

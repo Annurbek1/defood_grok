@@ -10,11 +10,24 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
       - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/defood
-      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
-    volumes:
-      - .:/app
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672//
+      - REDIS_URL=redis://redis:6379/0
+      - JWT_SECRET_KEY="django-insecure-dafyq&6n0w8+=yf@ozk^vnfj(4f@((+)^7=f#wp_oxw^68&(qr"
+      - GO_MAIN_SERVER_URL=http://main_server:8080
+      - GO_LOCATION_SERVER_URL=http://location_server:8081
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    networks:
+      - defood_network
 
   rabbitmq:
     image: rabbitmq:3-management
@@ -23,9 +36,25 @@ services:
       - "15672:15672"
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "check_port_connectivity"]
-      interval: 10s
+      interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
+      start_period: 15s
+    environment:
+      - RABBITMQ_DEFAULT_USER=guest
+      - RABBITMQ_DEFAULT_PASS=guest
+    restart: unless-stopped
+
+  redis:
+    image: redis:6-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
 
   postgres:
     image: postgres:13
@@ -40,8 +69,42 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 10s
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
+  main_server:
+    image: your-go-main-server-image
+    ports:
+      - "8080:8080"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - JWT_SECRET_KEY="django-insecure-dafyq&6n0w8+=yf@ozk^vnfj(4f@((+)^7=f#wp_oxw^68&(qr"
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672//
+      - REDIS_URL=redis://redis:6379/0
+    networks:
+      - defood_network
+
+  location_server:
+    image: your-go-location-server-image
+    ports:
+      - "8081:8081"
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - JWT_SECRET_KEY="django-insecure-dafyq&6n0w8+=yf@ozk^vnfj(4f@((+)^7=f#wp_oxw^68&(qr"
+      - REDIS_URL=redis://redis:6379/0
+    networks:
+      - defood_network
+
 volumes:
   postgres_data:
+
+networks:
+  defood_network:
+    driver: bridge
