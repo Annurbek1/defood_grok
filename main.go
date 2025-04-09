@@ -18,6 +18,7 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/recover"
 	"github.com/gofiber/swagger"
 	"github.com/gofiber/websocket/v2"
+	"github.com/golang-jwt/jwt/v4"
 	"github.com/streadway/amqp"
 )
 
@@ -116,6 +117,10 @@ func (s *Server) initConnections() error {
 		DB:   s.config.Redis.DB,
 	})
 
+	if err := s.rdb.Ping(context.Background()).Err(); err != nil {
+		return fmt.Errorf("redis connection failed: %v", err)
+	}
+
 	// RabbitMQ connection with retry
 	var rabbitmqConn *amqp.Connection
 	var err error
@@ -135,19 +140,88 @@ func (s *Server) initConnections() error {
 	}
 	s.rabbitmq = rabbitmqConn
 
-	// Kafka producer setup
+	// Kafka setup with retry
 	kafkaConfig := sarama.NewConfig()
 	kafkaConfig.Producer.Return.Successes = true
-	producer, err := sarama.NewSyncProducer(s.config.Kafka.Brokers, kafkaConfig)
+
+	var producer sarama.SyncProducer
+	for i := 0; i < 5; i++ {
+		producer, err = sarama.NewSyncProducer(s.config.Kafka.Brokers, kafkaConfig)
+		if err == nil {
+			break
+		}
+		if i < 4 {
+			log.Printf("Failed to connect to Kafka: %v. Retrying in 5 seconds...", err)
+			time.Sleep(5 * time.Second)
+		}
+	}
 	if err != nil {
 		return fmt.Errorf("failed to create Kafka producer: %v", err)
 	}
 	s.kafka = producer
 
-	// Start courier status checker
-	go s.checkCourierStatus()
-
 	return nil
+}
+
+func (s *Server) validateToken(c *fiber.Ctx) error {
+	token := c.Query("token")
+	courierID := c.Query("courier_id")
+
+	if token == "" || courierID == "" {
+		return fiber.ErrUnauthorized
+	}
+
+	claims := jwt.MapClaims{}
+	_, err := jwt.ParseWithClaims(token, claims, func(token *jwt.Token) (interface{}, error) {
+		return []byte(s.config.JWT.SecretKey), nil
+	})
+
+	if err != nil || claims["courier_id"] != courierID {
+		return fiber.ErrUnauthorized
+	}
+
+	return c.Next()
+}
+
+func (s *Server) handleCourierWebSocket(c *websocket.Conn) {
+	courierID := c.Query("courier_id")
+	ctx := context.Background()
+
+	// Set courier as active in Redis
+	err := s.rdb.HSet(ctx, "courier:"+courierID, map[string]interface{}{
+		"is_active":   "true",
+		"last_update": time.Now().Unix(),
+	}).Err()
+
+	if err != nil {
+		log.Printf("Error setting courier active: %v", err)
+		return
+	}
+
+	// Ensure courier is marked inactive when connection closes
+	defer func() {
+		if err := s.rdb.HSet(ctx, "courier:"+courierID, "is_active", "false").Err(); err != nil {
+			log.Printf("Error setting courier inactive: %v", err)
+		}
+		delete(s.wsClients, courierID)
+	}()
+
+	s.wsClients[courierID] = c
+
+	for {
+		var msg struct {
+			Event   string `json:"event"`
+			OrderID string `json:"order_id"`
+		}
+
+		if err := c.ReadJSON(&msg); err != nil {
+			break
+		}
+
+		if msg.Event == "delivery_confirmed" {
+			s.handleDeliveryConfirmation(courierID, msg.OrderID)
+		}
+	}
 }
 
 func (s *Server) logEvent(topic string, event map[string]interface{}) error {

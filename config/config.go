@@ -12,6 +12,7 @@ type Config struct {
 	Server   ServerConfig
 	Redis    RedisConfig
 	Kafka    KafkaConfig
+	JWT      JWTConfig
 }
 
 type RabbitMQConfig struct {
@@ -38,6 +39,10 @@ type KafkaConfig struct {
 	Topic   string
 }
 
+type JWTConfig struct {
+	SecretKey string
+}
+
 func LoadConfig() (*Config, error) {
 	_ = godotenv.Load()
 
@@ -61,6 +66,9 @@ func LoadConfig() (*Config, error) {
 		Kafka: KafkaConfig{
 			Brokers: []string{getEnv("KAFKA_BROKER", "kafka-denaueats:9092")},
 			Topic:   getEnv("KAFKA_TOPIC", "food_orders"),
+		},
+		JWT: JWTConfig{
+			SecretKey: getEnv("JWT_SECRET_KEY", "my-secret-key"),
 		},
 	}, nil
 }

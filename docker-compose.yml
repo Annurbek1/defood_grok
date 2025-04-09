@@ -27,6 +27,30 @@ services:
       timeout: 3s
       retries: 3
 
+  main-server:
+    build: ./main_server
+    ports:
+      - "8080:8080"
+    environment:
+      - JWT_SECRET_KEY="django-insecure-dafyq&6n0w8+=yf@ozk^vnfj(4f@((+)^7=f#wp_oxw^68&(qr"
+    depends_on:
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+
+  location-server:
+    build: ./location
+    ports:
+      - "9000:9000"
+    environment:
+      - JWT_SECRET_KEY="django-insecure-dafyq&6n0w8+=yf@ozk^vnfj(4f@((+)^7=f#wp_oxw^68&(qr"
+    depends_on:
+      redis:
+        condition: service_healthy
+
   kafka:
     image: confluentinc/cp-kafka:latest
     ports:
@@ -34,6 +58,11 @@ services:
     environment:
       - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://localhost:9092
       - KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics.sh --list --bootstrap-server localhost:9092"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   prometheus:
     image: prom/prometheus
