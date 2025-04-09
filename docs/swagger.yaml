@@ -1,0 +1,9 @@
+basePath: /
+host: localhost:3000
+info:
+  contact: {}
+  description: Processes orders via RabbitMQ and shows Swagger docs
+  title: Fiber Restaurant Order API
+  version: "1.0"
+paths: {}
+swagger: "2.0"

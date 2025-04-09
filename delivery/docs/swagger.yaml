@@ -1,0 +1,9 @@
+basePath: /
+host: localhost:4000
+info:
+  contact: {}
+  description: Delivery service for food ordering system
+  title: Delivery Service API
+  version: "1.0"
+paths: {}
+swagger: "2.0"
