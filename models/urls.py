@@ -3,22 +3,31 @@ from django.conf.urls.static import static
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from rest_framework_simplejwt.views import TokenRefreshView
-
-from .views import RegisterView, LoginView, ProfileView, OrderViewSet
-from .views import RestaurantViewSet, AddressViewSet, MenuItemViewSet
+from .views import (
+    RegisterView, LoginView, ProfileView,
+    OrderViewSet, RestaurantViewSet, AddressViewSet, MenuItemViewSet,
+    internal_order_detail, internal_order_complete,
+)
 
 router = DefaultRouter()
-router.register(r'orders', OrderViewSet, basename='order')  # Управление заказами
-router.register(r'restaurants', RestaurantViewSet, basename='restaurant')  # Управление ресторанами
-router.register(r'addresses', AddressViewSet, basename='address')  # Управление адресами
-router.register(r'menu-items', MenuItemViewSet, basename='menuitem')  # Управление меню
+router.register(r'orders', OrderViewSet, basename='order')
+router.register(r'restaurants', RestaurantViewSet, basename='restaurant')
+router.register(r'addresses', AddressViewSet, basename='address')
+router.register(r'menu-items', MenuItemViewSet, basename='menuitem')
 
 urlpatterns = [
-    path('register/', RegisterView.as_view(), name='register'),  # Регистрация
-    path('login/', LoginView.as_view(), name='login'),  # Авторизация
-    path('token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),  # Обновление токена
-    path('profile/', ProfileView.as_view(), name='profile'),  # Профиль пользователя
-    path('api/', include(router.urls)),  # Подключение маршрутов API
+    # Auth endpoints
+    path('register/', RegisterView.as_view(), name='register'),
+    path('login/', LoginView.as_view(), name='login'),
+    path('token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+    path('profile/', ProfileView.as_view(), name='profile'),
+
+    # API endpoints (using router)
+    path('api/', include(router.urls)),
+
+    # Internal API endpoints
+    path('internal/order/<str:id>/', internal_order_detail, name='internal-order-detail'),
+    path('internal/order/<str:id>/complete/', internal_order_complete, name='internal-order-complete'),
 ]
 
 if settings.DEBUG:

@@ -15,36 +15,34 @@ Including another URLconf
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
 from django.contrib import admin
-from django.urls import path, include
+from django.urls import path, include, re_path
+from rest_framework import permissions
 from drf_yasg.views import get_schema_view
 from drf_yasg import openapi
-from rest_framework.permissions import AllowAny
-from rest_framework_simplejwt.views import TokenObtainPairView
 from django.conf import settings
 from django.conf.urls.static import static
 
 schema_view = get_schema_view(
-    openapi.Info(
-        title="DeFood API",
-        default_version="v1",
-        description="API documentation for DeFood service",
-        terms_of_service="https://www.google.com/policies/terms/",
-        contact=openapi.Contact(email="admin@defood.com"),
-        license=openapi.License(name="BSD License"),
-    ),
-    public=True,
-    permission_classes=[AllowAny],
-    authentication_classes=[],
+   openapi.Info(
+      title="DeFood API",
+      default_version='v1',
+      description="API documentation for DeFood service",
+      terms_of_service="https://www.defood.com/terms/",
+      contact=openapi.Contact(email="contact@defood.com"),
+      license=openapi.License(name="BSD License"),
+   ),
+   public=True,
+   permission_classes=(permissions.AllowAny,),
+   authentication_classes=(),
+   url='http://127.0.0.1:8000',  # Add your base URL here
 )
 
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('', include('models.urls')),
-
-    # Swagger and ReDoc endpoints
+    
+    # Updated Swagger URLs
+    path('swagger<format>/', schema_view.without_ui(cache_timeout=0), name='schema-json'),
     path('swagger/', schema_view.with_ui('swagger', cache_timeout=0), name='schema-swagger-ui'),
     path('redoc/', schema_view.with_ui('redoc', cache_timeout=0), name='schema-redoc'),
-
-    # Add login endpoint for Swagger
-    path('api/login/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
 ] + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

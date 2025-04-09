@@ -1,59 +1,96 @@
 from celery import shared_task
+from datetime import datetime
 import pika
 import json
 import logging
+from .models import Order
 
 logger = logging.getLogger(__name__)
 
+class RabbitMQPublisher:
+    def __init__(self):
+        self.exchange_name = 'defood_exchange'
+        self.connection = None
+        self.channel = None
 
-@shared_task(bind=True, autoretry_for=(Exception,), retry_backoff=True, retry_kwargs={'max_retries': 5})
-def send_user_data_to_queue(self, data):
-    try:
-        connection = pika.BlockingConnection(pika.ConnectionParameters(host='localhost'))
-        channel = connection.channel()
-
-        # Выбираем очередь в зависимости от типа данных
-        queue_name = 'order_data_queue' if 'order_id' in data else 'user_data_queue'
-        channel.queue_declare(queue=queue_name, durable=True)
-
-        channel.basic_publish(
-            exchange='',
-            routing_key=queue_name,
-            body=json.dumps(data),
-            properties=pika.BasicProperties(
-                delivery_mode=2,  # делаем сообщение постоянным
+    def connect(self):
+        if not self.connection or self.connection.is_closed:
+            self.connection = pika.BlockingConnection(
+                pika.ConnectionParameters(
+                    host='localhost',
+                    port=5672,
+                    credentials=pika.PlainCredentials('guest', 'guest')
+                )
             )
-        )
+            self.channel = self.connection.channel()
+            self.channel.exchange_declare(
+                exchange=self.exchange_name,
+                exchange_type='topic',
+                durable=True
+            )
 
-        connection.close()
-        logger.info(f"Data sent to RabbitMQ queue {queue_name}: {data}")
+    def publish(self, routing_key, message):
+        try:
+            self.connect()
+            self.channel.basic_publish(
+                exchange=self.exchange_name,
+                routing_key=routing_key,
+                body=json.dumps(message),
+                properties=pika.BasicProperties(
+                    delivery_mode=2,  # make message persistent
+                    content_type='application/json'
+                )
+            )
+        except Exception as e:
+            logger.error(f"Failed to publish message: {str(e)}")
+            raise
+        finally:
+            if self.connection and not self.connection.is_closed:
+                self.connection.close()
 
-    except Exception as e:
-        logger.error(f"RabbitMQ Error: {e}")
-        raise self.retry(exc=e)
-
-
-@shared_task
-def process_user_data_from_queue():
+@shared_task(name='models.tasks.send_order_to_queue')
+def send_order_to_queue(order_id):
     try:
-        connection = pika.BlockingConnection(pika.ConnectionParameters(host='localhost'))
-        channel = connection.channel()
-
-        channel.queue_declare(queue='user_data_queue', durable=True)
-
-        def callback(ch, method, properties, body):
-            try:
-                user_data = json.loads(body)
-                logger.info(f"Received user data from RabbitMQ: {user_data}")
-
-                ch.basic_ack(delivery_tag=method.delivery_tag)
-
-            except Exception as e:
-                logger.error(f"Error processing message: {e}")
-
-        channel.basic_consume(queue='user_data_queue', on_message_callback=callback)
-        logger.info('Waiting for messages in user_data_queue...')
-        channel.start_consuming()
-
+        # Получаем данные заказа
+        order = Order.objects.get(id=order_id)
+        message = {
+            'order_id': str(order.id),
+            'event_type': 'order_created',
+            'timestamp': datetime.now().isoformat(),
+            'data': {
+                'user_id': str(order.user.id),
+                'restaurant_id': str(order.restaurant.id),
+                'total_amount': str(order.total_amount),
+                'status': order.status,
+                'items': [{
+                    'menu_item_id': str(item.menu_item.id),
+                    'quantity': item.quantity,
+                    'price': str(item.price_at_time)
+                } for item in order.items.all()]
+            }
+        }
+        
+        publisher = RabbitMQPublisher()
+        publisher.publish('defood.orders.created', message)
+        logger.info(f"Order message sent to queue: {message}")
+        return message
     except Exception as e:
-        logger.error(f"RabbitMQ Error: {e}")
+        logger.error(f"Failed to send order to queue: {e}")
+        raise
+
+@shared_task(name='models.tasks.send_user_data_to_queue')
+def send_user_data_to_queue(user_data):
+    try:
+        message = {
+            'event_type': 'user_created',
+            'timestamp': datetime.now().isoformat(),
+            'data': user_data
+        }
+        
+        publisher = RabbitMQPublisher()
+        publisher.publish('defood.users.created', message)
+        logger.info(f"User message sent to queue: {message}")
+        return message
+    except Exception as e:
+        logger.error(f"Failed to send user data to queue: {e}")
+        raise

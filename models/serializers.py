@@ -4,7 +4,7 @@ from django.contrib.auth import get_user_model
 from rest_framework import serializers
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from .models import Order, OrderItem, MenuItem, Address, Restaurant
+from .models import Order, OrderItem, MenuItem, Address, Restaurant, CustomUser, Courier
 from .tasks import send_user_data_to_queue
 
 User = get_user_model()
@@ -43,102 +43,128 @@ class RegisterSerializer(serializers.ModelSerializer):
 
 
 class LoginSerializer(serializers.Serializer):
-    phone_number = serializers.CharField()
+    phone_number = serializers.CharField()  # Изменили с phone на phone_number
     password = serializers.CharField(write_only=True)
 
     def validate(self, data):
-        user = User.objects.filter(phone_number=data['phone_number']).first()
+        user = CustomUser.objects.filter(phone_number=data['phone_number']).first()
         if user and user.check_password(data['password']):
             refresh = RefreshToken.for_user(user)
+            token_data = {'user_id': user.id}
+            try:
+                courier = Courier.objects.get(user=user)
+                token_data['courier_id'] = courier.id
+            except Courier.DoesNotExist:
+                pass
+            refresh.payload.update(token_data)
+            return {'token': str(refresh.access_token)}
+        raise serializers.ValidationError("Invalid phone number or password")
 
-            login_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            send_user_data_to_queue.delay({
-                "id": user.id,
-                "phone_number": user.phone_number,
-                "first_name": user.first_name,
-                "last_name": user.last_name,
-                "login_time": login_time
-            })
-
-            return {
-                'refresh': str(refresh),
-                'access': str(refresh.access_token),
-            }
-
-        raise serializers.ValidationError("Telefon raqami yoki parol noto‘g‘ri")
 
 class OrderItemSerializer(serializers.ModelSerializer):
     menu_item = serializers.PrimaryKeyRelatedField(queryset=MenuItem.objects.all())
-    price_at_time = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
+    quantity = serializers.IntegerField(min_value=1)
 
     class Meta:
         model = OrderItem
-        fields = ['id', 'menu_item', 'quantity', 'price_at_time']
+        fields = ['menu_item', 'quantity']
 
-    def create(self, validated_data):
-        # Исправляем обработку menu_item
-        menu_item = MenuItem.objects.get(id=validated_data['menu_item'].id)
-        validated_data['price_at_time'] = menu_item.price
-        return OrderItem.objects.create(menu_item=menu_item, **validated_data)
 
-class OrderSerializer(serializers.ModelSerializer):
-    user = serializers.HiddenField(default=serializers.CurrentUserDefault())
-    restaurant = serializers.PrimaryKeyRelatedField(queryset=Restaurant.objects.all())
-    items = OrderItemSerializer(many=True, required=True)
-    delivery_address = serializers.PrimaryKeyRelatedField(queryset=Address.objects.all(), required=True)
-
+class OrderCreateSerializer(serializers.ModelSerializer):
+    type = serializers.CharField(default='food')
+    
     class Meta:
         model = Order
-        fields = ['id', 'user', 'restaurant', 'items', 'delivery_address', 'total_amount', 'status', 'created_at', 'updated_at']
-        extra_kwargs = {
-            'total_amount': {'required': False},
-            'status': {'default': 'PENDING'},
-            'created_at': {'read_only': True},
-            'updated_at': {'read_only': True},
-        }
+        fields = ['type', 'restaurant', 'address', 'details']  # Changed from delivery_address to address
+
+    def validate(self, data):
+        user = self.context['request'].user
+        if data['address'].user != user:  # Changed from delivery_address
+            raise serializers.ValidationError("Invalid address")
+        return data
+
+
+class OrderSerializer(serializers.ModelSerializer):
+    items = OrderItemSerializer(many=True)
+    
+    class Meta:
+        model = Order
+        fields = ['id', 'restaurant', 'address', 'items', 'total_amount', 'status', 'details']
+
+    def validate_items(self, value):
+        if not value:
+            raise serializers.ValidationError("Необходимо указать хотя бы один товар")
+        return value
 
     def create(self, validated_data):
-        items_data = validated_data.pop('items')
-        order = Order.objects.create(**validated_data)
-
-        total_amount = 0
-        for item_data in items_data:
-            menu_item = item_data.pop('menu_item')  # menu_item уже объект
-            quantity = item_data.pop('quantity', 1)
-            price = menu_item.price
-            OrderItem.objects.create(
-                order=order,
-                menu_item=menu_item,
-                quantity=quantity,
-                price_at_time=price
+        try:
+            items_data = validated_data.pop('items')
+            # Создаем заказ с пользователем из контекста и details
+            order = Order.objects.create(
+                user=self.context['request'].user,
+                status='PENDING',
+                details={
+                    'items': [{
+                        'menu_item_id': str(item['menu_item'].id),
+                        'name': item['menu_item'].name,
+                        'quantity': item['quantity'],
+                        'price': str(item['menu_item'].price)
+                    } for item in items_data],
+                },
+                **validated_data
             )
-            total_amount += price * quantity
 
-        order.total_amount = total_amount
-        order.save()
+            # Создаем элементы заказа и считаем общую сумму
+            total_amount = 0
+            for item_data in items_data:
+                menu_item = item_data['menu_item']
+                quantity = item_data['quantity']
+                price_at_time = menu_item.price
+                
+                OrderItem.objects.create(
+                    order=order,
+                    menu_item=menu_item,
+                    quantity=quantity,
+                    price_at_time=price_at_time
+                )
+                total_amount += price_at_time * quantity
 
-        # Отправка данных заказа в RabbitMQ
-        order_data = {
-            'order_id': order.id,
-            'user_id': order.user.id,
-            'restaurant_id': order.restaurant.id,
-            'total_amount': str(order.total_amount),
-            'status': order.status,
-            'created_at': order.created_at.isoformat(),
-            'items': [{
-                'menu_item_id': item.menu_item.id,
-                'quantity': item.quantity,
-                'price': str(item.price_at_time)
-            } for item in order.items.all()]
-        }
-        send_user_data_to_queue.delay(order_data)
+            # Обновляем детали заказа с общей суммой
+            order.details.update({
+                'total_amount': str(total_amount),
+                'address': {
+                    'street': order.address.street,
+                    'house': order.address.house_number,
+                    'apartment': order.address.apartment,
+                    'floor': order.address.floor,
+                    'entrance': order.address.entrance,
+                },
+                'restaurant': {
+                    'name': order.restaurant.name,
+                    'address': order.restaurant.address,
+                    'phone': order.restaurant.phone
+                },
+                'created_at': order.created_at.isoformat()
+            })
+            
+            # Сохраняем заказ с обновленными деталями и суммой
+            order.total_amount = total_amount
+            order.save()
+            
+            return order
+            
+        except Exception as e:
+            if 'order' in locals():
+                order.delete()
+            logger.error(f"Error creating order: {str(e)}")
+            raise serializers.ValidationError(f"Ошибка при создании заказа: {str(e)}")
 
-        return order
 
 class AddressSerializer(serializers.ModelSerializer):
     class Meta:
         model = Address
         fields = ['street', 'city', 'postal_code']
+
 
 class RestaurantSerializer(serializers.ModelSerializer):
     class Meta:
@@ -148,6 +174,7 @@ class RestaurantSerializer(serializers.ModelSerializer):
     def to_representation(self, instance):
         representation = super().to_representation(instance)
         return representation
+
 
 class MenuItemSerializer(serializers.ModelSerializer):
     class Meta:
