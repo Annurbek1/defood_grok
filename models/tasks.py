@@ -3,44 +3,66 @@ from datetime import datetime
 import pika
 import json
 import logging
+import time
+from celery.exceptions import MaxRetriesExceededError
 from .models import Order
 
 logger = logging.getLogger(__name__)
 
 class RabbitMQPublisher:
-    def __init__(self):
+    def __init__(self, max_retries=5, retry_delay=5):
         self.exchange_name = 'defood_exchange'
         self.connection = None
         self.channel = None
+        self.max_retries = max_retries
+        self.retry_delay = retry_delay
 
     def connect(self):
-        if not self.connection or self.connection.is_closed:
-            self.connection = pika.BlockingConnection(
-                pika.ConnectionParameters(
-                    host='localhost',
-                    port=5672,
-                    credentials=pika.PlainCredentials('guest', 'guest')
-                )
-            )
-            self.channel = self.connection.channel()
-            self.channel.exchange_declare(
-                exchange=self.exchange_name,
-                exchange_type='topic',
-                durable=True
-            )
+        retries = 0
+        while retries < self.max_retries:
+            try:
+                if not self.connection or self.connection.is_closed:
+                    self.connection = pika.BlockingConnection(
+                        pika.ConnectionParameters(
+                            host='localhost',
+                            port=5672,
+                            credentials=pika.PlainCredentials('guest', 'guest'),
+                            heartbeat=600,
+                            connection_attempts=3
+                        )
+                    )
+                    self.channel = self.connection.channel()
+                    self.channel.exchange_declare(
+                        exchange=self.exchange_name,
+                        exchange_type='topic',
+                        durable=True
+                    )
+                    return True
+            except pika.exceptions.AMQPConnectionError as e:
+                retries += 1
+                if retries == self.max_retries:
+                    logger.error(f"Failed to connect to RabbitMQ after {self.max_retries} attempts")
+                    raise
+                logger.warning(f"RabbitMQ connection attempt {retries} failed, retrying in {self.retry_delay} seconds...")
+                time.sleep(self.retry_delay)
+        return False
 
     def publish(self, routing_key, message):
         try:
-            self.connect()
+            connected = self.connect()
+            if not connected:
+                raise Exception("Failed to establish RabbitMQ connection")
+                
             self.channel.basic_publish(
                 exchange=self.exchange_name,
                 routing_key=routing_key,
                 body=json.dumps(message),
                 properties=pika.BasicProperties(
-                    delivery_mode=2,  # make message persistent
+                    delivery_mode=2,
                     content_type='application/json'
                 )
             )
+            return True
         except Exception as e:
             logger.error(f"Failed to publish message: {str(e)}")
             raise

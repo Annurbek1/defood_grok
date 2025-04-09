@@ -3,10 +3,13 @@ from datetime import datetime, timezone
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
 from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
 from .models import Order, OrderItem, MenuItem, Address, Restaurant, CustomUser, Courier
 from .tasks import send_user_data_to_queue
+import logging
 
+logger = logging.getLogger(__name__)
 User = get_user_model()
 
 
@@ -42,22 +45,37 @@ class RegisterSerializer(serializers.ModelSerializer):
         return user
 
 
+class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
+    def validate(self, attrs):
+        data = super().validate(attrs)
+        user = self.user
+        try:
+            courier = Courier.objects.get(user=user)
+            self.token['courier_id'] = courier.id
+        except Courier.DoesNotExist:
+            pass
+        return data
+
+
 class LoginSerializer(serializers.Serializer):
-    phone_number = serializers.CharField()  # Изменили с phone на phone_number
+    phone_number = serializers.CharField()
     password = serializers.CharField(write_only=True)
 
     def validate(self, data):
         user = CustomUser.objects.filter(phone_number=data['phone_number']).first()
         if user and user.check_password(data['password']):
             refresh = RefreshToken.for_user(user)
-            token_data = {'user_id': user.id}
+            token_data = {
+                'user_id': user.id,
+                'access': str(refresh.access_token),
+                'refresh': str(refresh)
+            }
             try:
                 courier = Courier.objects.get(user=user)
                 token_data['courier_id'] = courier.id
             except Courier.DoesNotExist:
                 pass
-            refresh.payload.update(token_data)
-            return {'token': str(refresh.access_token)}
+            return token_data
         raise serializers.ValidationError("Invalid phone number or password")
 
 
